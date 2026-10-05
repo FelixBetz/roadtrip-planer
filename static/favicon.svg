@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1e3a8a"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="url(#bg)"/>
+  <!-- Car body -->
+  <path d="M14 36 L18 26 Q19 23 22 23 L42 23 Q45 23 46 26 L50 36 Q52 36 52 38 L52 42 Q52 44 50 44 L14 44 Q12 44 12 42 L12 38 Q12 36 14 36 Z" fill="white"/>
+  <!-- Windows -->
+  <path d="M20 34 L23 27 L31 27 L31 34 Z" fill="#3b82f6"/>
+  <path d="M34 34 L34 27 L41 27 L44 34 Z" fill="#3b82f6"/>
+  <!-- Wheels -->
+  <circle cx="21" cy="44" r="5" fill="#1e3a8a" stroke="white" stroke-width="2"/>
+  <circle cx="43" cy="44" r="5" fill="#1e3a8a" stroke="white" stroke-width="2"/>
+</svg>

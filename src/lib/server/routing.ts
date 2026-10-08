@@ -45,7 +45,8 @@ async function routeOrs(points: RoutePoint[], opts: RouteOptions, key: string): 
 
     const body: Record<string, unknown> = {
         coordinates: points.map((p) => [p.lon, p.lat]),
-        instructions: false,
+        // Ohne Anweisungen liefert ORS keine „segments“ (km/Zeit pro Abschnitt) – daher an lassen
+        instructions: true,
         // -1 = Punkt beliebig weit zur nächsten Straße snappen (Default 350 m schlägt bei Orten oft fehl)
         radiuses: points.map(() => -1),
     };
@@ -69,17 +70,36 @@ async function routeOrs(points: RoutePoint[], opts: RouteOptions, key: string): 
     const coords: [number, number][] = (feature?.geometry?.coordinates ?? []).map(
         (c: number[]) => [c[1], c[0]] as [number, number],
     );
-    const segments: { distance: number; duration: number }[] = feature?.properties?.segments ?? [];
+    const segments: { distance?: number; duration?: number }[] = feature?.properties?.segments ?? [];
     const wayPoints: number[] = feature?.properties?.way_points ?? [];
-    if (!coords.length || segments.length !== points.length - 1 || wayPoints.length !== points.length) {
-        throw new RoutingError('OpenRouteService: unerwartete Antwort.');
+    if (!coords.length || wayPoints.length !== points.length) {
+        console.error('Unerwartete ORS-Antwort:', JSON.stringify(json)?.slice(0, 1000));
+        throw new RoutingError(
+            `OpenRouteService: unerwartete Antwort (${points.length} Orte, ${wayPoints.length} Wegpunkte, ${coords.length} Koordinaten).`,
+        );
     }
 
-    const legs: RouteLeg[] = segments.map((seg, i) => ({
-        coords: simplify(coords.slice(wayPoints[i], wayPoints[i + 1] + 1)),
-        distance: seg.distance ?? 0,
-        duration: seg.duration ?? 0,
-    }));
+    const legCoords = wayPoints.slice(0, -1).map((w, i) => coords.slice(w, wayPoints[i + 1] + 1));
+    let legs: RouteLeg[];
+    if (segments.length === points.length - 1) {
+        legs = segments.map((seg, i) => ({
+            coords: simplify(legCoords[i]),
+            distance: seg.distance ?? 0,
+            duration: seg.duration ?? 0,
+        }));
+    } else {
+        // Ohne Abschnittswerte: km aus der Geometrie, Fahrzeit anteilig aus der Gesamtzeit
+        const lengths = legCoords.map(pathLength);
+        const total = lengths.reduce((a, b) => a + b, 0) || 1;
+        const summary = feature?.properties?.summary ?? {};
+        const totalDistance = summary.distance ?? total;
+        const totalDuration = summary.duration ?? 0;
+        legs = legCoords.map((c, i) => ({
+            coords: simplify(c),
+            distance: (lengths[i] / total) * totalDistance,
+            duration: (lengths[i] / total) * totalDuration,
+        }));
+    }
     return finish('ors', legs);
 }
 
@@ -147,6 +167,19 @@ function finish(provider: 'ors' | 'osrm', legs: RouteLeg[]): Omit<RouteData, 'ke
         distance: legs.reduce((a, l) => a + l.distance, 0),
         duration: legs.reduce((a, l) => a + l.duration, 0),
     };
+}
+
+/** Länge eines Linienzugs aus [lat, lon]-Punkten in Metern */
+function pathLength(pts: [number, number][]): number {
+    let m = 0;
+    for (let i = 1; i < pts.length; i++) {
+        const [la1, lo1] = pts[i - 1], [la2, lo2] = pts[i];
+        const r = Math.PI / 180;
+        const dLat = (la2 - la1) * r, dLon = (lo2 - lo1) * r;
+        const h = Math.sin(dLat / 2) ** 2 + Math.cos(la1 * r) * Math.cos(la2 * r) * Math.sin(dLon / 2) ** 2;
+        m += 2 * 6371000 * Math.asin(Math.sqrt(h));
+    }
+    return m;
 }
 
 function sqDist(a: [number, number], b: [number, number]): number {

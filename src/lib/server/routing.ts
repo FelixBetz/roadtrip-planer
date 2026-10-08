@@ -5,7 +5,7 @@
  * Ohne Key         → öffentlicher OSRM-Demo-Server + Photon (nur zum Ausprobieren)
  */
 import { env } from '$env/dynamic/private';
-import type { GeocodeResult, RouteData, RouteLeg } from '$lib/types.js';
+import type { GeocodeResult, RouteData, RouteLeg, TollSection } from '$lib/types.js';
 
 export interface RoutePoint { lat: number; lon: number }
 export interface RouteOptions { avoidHighways: boolean; avoidTolls: boolean }
@@ -25,7 +25,8 @@ function orsKey(): string | null {
 /** Fingerabdruck, um zu erkennen, ob die gespeicherte Route noch zu den Stopps passt. */
 export function routeKey(points: RoutePoint[], opts: RouteOptions): string {
     const p = points.map((s) => `${s.lat.toFixed(5)},${s.lon.toFixed(5)}`).join(';');
-    return `${p}|h${opts.avoidHighways ? 1 : 0}t${opts.avoidTolls ? 1 : 0}|${orsKey() ? 'ors' : 'osrm'}`;
+    // „v5“: seit Mautabschnitte mit Land und Etappe mitgespeichert werden (v7: mit Position je Abschnitt) – ältere Routen neu berechnen
+    return `${p}|h${opts.avoidHighways ? 1 : 0}t${opts.avoidTolls ? 1 : 0}|${orsKey() ? 'ors' : 'osrm'}|v7`;
 }
 
 // -- Routing -------------------------------------------------------
@@ -47,6 +48,8 @@ async function routeOrs(points: RoutePoint[], opts: RouteOptions, key: string): 
         coordinates: points.map((p) => [p.lon, p.lat]),
         // Ohne Anweisungen liefert ORS keine „segments“ (km/Zeit pro Abschnitt) – daher an lassen
         instructions: true,
+        // Liefert, welche Teile der Strecke mautpflichtig sind
+        extra_info: ['tollways'],
         // -1 = Punkt beliebig weit zur nächsten Straße snappen (Default 350 m schlägt bei Orten oft fehl)
         radiuses: points.map(() => -1),
     };
@@ -100,7 +103,7 @@ async function routeOrs(points: RoutePoint[], opts: RouteOptions, key: string): 
             duration: (lengths[i] / total) * totalDuration,
         }));
     }
-    return finish('ors', legs);
+    return { ...finish('ors', legs), tolls: await tollSections(coords, feature?.properties?.extras?.tollways?.values, wayPoints, key) };
 }
 
 async function routeOsrm(points: RoutePoint[], opts: RouteOptions): Promise<Omit<RouteData, 'key'>> {
@@ -169,6 +172,137 @@ function finish(provider: 'ors' | 'osrm', legs: RouteLeg[]): Omit<RouteData, 'ke
     };
 }
 
+/** Lücken bis zu dieser Länge (Mautstation, Brücke …) zählen noch zum selben Mautabschnitt */
+const TOLL_GAP_M = 5000;
+
+/**
+ * ORS liefert Maut als [vonIndex, bisIndex, wert] über die Gesamtgeometrie (wert 1 = mautpflichtig).
+ * Daraus werden Linienzüge zum Einzeichnen, die Maut-km und – für die Kostenschätzung –
+ * zusammenhängende Abschnitte mit ihrem Land.
+ */
+async function tollSections(
+    coords: [number, number][], values: unknown, wayPoints: number[], key: string,
+): Promise<RouteData['tolls']> {
+    if (!Array.isArray(values)) return undefined;
+    const lines: [number, number][][] = [];
+    const ranges: [number, number][] = [];
+    for (const v of values) {
+        if (!Array.isArray(v) || v[2] !== 1) continue;
+        const a = Number(v[0]), b = Number(v[1]);
+        const line = coords.slice(a, b + 1);
+        if (line.length < 2) continue;
+        lines.push(simplify(line));
+        const prev = ranges[ranges.length - 1];
+        if (prev && pathLength(coords.slice(prev[1], a + 1)) <= TOLL_GAP_M) prev[1] = b;
+        else ranges.push([a, b]);
+    }
+    const distance = lines.length ? ranges.reduce((m, [a, b]) => m + pathLength(coords.slice(a, b + 1)), 0) : 0;
+
+    // Land je Abschnitt. Geht ein Abschnitt über eine Grenze (z.B. Brenner: A13 → A22),
+    // wird die Grenze per Intervallhalbierung gesucht und der Abschnitt dort geteilt.
+    const cache = new Map<number, Promise<string>>();
+    const country = (i: number) => {
+        let c = cache.get(i);
+        if (!c) {
+            c = countryAt(coords[i][0], coords[i][1], key).then((x) => x ?? '?');
+            cache.set(i, c);
+        }
+        return c;
+    };
+    type Part = { country: string; a: number; b: number };
+    async function split(a: number, b: number, depth = 0): Promise<Part[]> {
+        const ca = await country(a), cb = await country(b);
+        if (ca === cb || b - a < 2 || depth > 4) return [{ country: ca, a, b }];
+        let lo = a, hi = b; // country(lo) = ca, country(hi) ≠ ca
+        while (hi - lo > 1) {
+            const m = Math.floor((lo + hi) / 2);
+            if ((await country(m)) === ca) lo = m; else hi = m;
+        }
+        return [{ country: ca, a, b: hi }, ...(await split(hi, b, depth + 1))];
+    }
+    // Nacheinander statt parallel, damit das Minutenlimit der Geocodierung nicht greift
+    const parts: Part[] = [];
+    for (const [a, b] of ranges) parts.push(...(await split(a, b)));
+
+    // Zusätzlich an den Orten teilen, damit jeder Abschnitt genau einer Etappe zugeordnet ist
+    const sections: TollSection[] = [];
+    parts.forEach((p, part) => {
+        for (let leg = 0; leg < wayPoints.length - 1; leg++) {
+            const a = Math.max(p.a, wayPoints[leg]), b = Math.min(p.b, wayPoints[leg + 1]);
+            if (b <= a) continue;
+            const mid = coords[Math.floor((a + b) / 2)];
+            sections.push({ country: p.country, distance: pathLength(coords.slice(a, b + 1)), leg, part, at: mid });
+        }
+    });
+    return { lines, distance, sections };
+}
+
+/** Land (ISO-3166 Alpha-2) an einem Punkt über das ORS-Reverse-Geocoding */
+async function countryAt(lat: number, lon: number, key: string): Promise<string | null> {
+    return (await countryOrs(lat, lon, key)) ?? (await countryPhoton(lat, lon));
+}
+
+/** Geocoding-Anfrage an ORS; der Key geht wie beim Routing im Authorization-Header mit. */
+async function orsGeocode(path: string, params: Record<string, string>, key: string): Promise<Response> {
+    const res = await fetch(`${ORS}/geocode/${path}?${new URLSearchParams(params)}`, {
+        headers: { Authorization: key, Accept: 'application/json' },
+    });
+    if (!res.ok && res.status !== 429) {
+        const body = await res.clone().text().catch(() => '');
+        console.warn(`ORS-Geocoding ${path}: ${res.status} ${body.slice(0, 200)}`);
+    }
+    return res;
+}
+
+/** Lehnt ORS das Geocoding ab (z.B. 403), wird 10 Minuten lang direkt Photon gefragt. */
+let orsGeocodingBlockedUntil = 0;
+const orsGeocodingBlocked = () => Date.now() < orsGeocodingBlockedUntil;
+const blockOrsGeocoding = () => { orsGeocodingBlockedUntil = Date.now() + 10 * 60_000; };
+
+async function countryOrs(lat: number, lon: number, key: string): Promise<string | null> {
+    if (orsGeocodingBlocked()) return null;
+    const params = { 'point.lat': String(lat), 'point.lon': String(lon), size: '1' };
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const res = await orsGeocode('reverse', params, key);
+            if (res.status === 429 && attempt === 0) {
+                // Minutenlimit der ORS-Geocodierung – kurz warten und nochmal
+                await new Promise((r) => setTimeout(r, 1500));
+                continue;
+            }
+            if (!res.ok) {
+                if (res.status === 401 || res.status === 403) blockOrsGeocoding();
+                return null;
+            }
+            const p = ((await res.json()) as any)?.features?.[0]?.properties;
+            const c = typeof p?.country_code === 'string' ? p.country_code : ISO3[p?.country_a];
+            return c ? String(c).toUpperCase() : null;
+        } catch (e) {
+            console.warn('Land per ORS nicht bestimmbar:', e);
+            return null;
+        }
+    }
+    return null;
+}
+
+/** Ausweichlösung ohne Key: Photon (OpenStreetMap) liefert „countrycode“ */
+async function countryPhoton(lat: number, lon: number): Promise<string | null> {
+    try {
+        const qs = new URLSearchParams({ lat: String(lat), lon: String(lon), limit: '1' });
+        const res = await fetch(`${PHOTON}/reverse?${qs}`, { headers: { 'User-Agent': USER_AGENT } });
+        if (!res.ok) return null;
+        const c = ((await res.json()) as any)?.features?.[0]?.properties?.countrycode;
+        return typeof c === 'string' ? c.toUpperCase() : null;
+    } catch {
+        return null;
+    }
+}
+
+const ISO3: Record<string, string> = {
+    DEU: 'DE', AUT: 'AT', ITA: 'IT', CHE: 'CH', FRA: 'FR', ESP: 'ES', PRT: 'PT', SVN: 'SI', HRV: 'HR', SMR: 'SM',
+    LIE: 'LI', BEL: 'BE', NLD: 'NL', LUX: 'LU', CZE: 'CZ', POL: 'PL', HUN: 'HU', DNK: 'DK', GRC: 'GR',
+};
+
 /** Länge eines Linienzugs aus [lat, lon]-Punkten in Metern */
 function pathLength(pts: [number, number][]): number {
     let m = 0;
@@ -220,11 +354,11 @@ function simplify(pts: [number, number][], tol = 0.0003): [number, number][] {
 
 export async function geocode(text: string): Promise<GeocodeResult[]> {
     const key = orsKey();
-    if (key) {
-        const qs = new URLSearchParams({ api_key: key, text, size: '6', lang: 'de' });
-        const res = await fetch(`${ORS}/geocode/autocomplete?${qs}`);
-        if (!res.ok) throw new RoutingError(`Ortssuche fehlgeschlagen (${res.status})`);
-        return fromGeoJson(await res.json());
+    if (key && !orsGeocodingBlocked()) {
+        const res = await orsGeocode('autocomplete', { text, size: '6', lang: 'de' }, key);
+        if (res.ok) return fromGeoJson(await res.json());
+        if (res.status === 401 || res.status === 403) blockOrsGeocoding();
+        // sonst weiter mit Photon
     }
     const qs = new URLSearchParams({ q: text, limit: '6', lang: 'de' });
     const res = await fetch(`${PHOTON}/api/?${qs}`, { headers: { 'User-Agent': USER_AGENT } });
@@ -235,15 +369,15 @@ export async function geocode(text: string): Promise<GeocodeResult[]> {
 export async function reverseGeocode(lat: number, lon: number): Promise<GeocodeResult | null> {
     const key = orsKey();
     let json: unknown;
-    if (key) {
-        const qs = new URLSearchParams({
-            api_key: key, 'point.lat': String(lat), 'point.lon': String(lon), size: '1', lang: 'de',
+    if (key && !orsGeocodingBlocked()) {
+        const res = await orsGeocode('reverse', {
+            'point.lat': String(lat), 'point.lon': String(lon), size: '1', lang: 'de',
             layers: 'locality,localadmin,neighbourhood,venue',
-        });
-        const res = await fetch(`${ORS}/geocode/reverse?${qs}`);
-        if (!res.ok) return null;
-        json = await res.json();
-    } else {
+        }, key);
+        if (res.ok) json = await res.json();
+        else if (res.status === 401 || res.status === 403) blockOrsGeocoding();
+    }
+    if (!json) {
         const qs = new URLSearchParams({ lat: String(lat), lon: String(lon), limit: '1', lang: 'de' });
         const res = await fetch(`${PHOTON}/reverse?${qs}`, { headers: { 'User-Agent': USER_AGENT } });
         if (!res.ok) return null;

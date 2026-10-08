@@ -1,9 +1,11 @@
 <script lang="ts">
+  import BetaBadge from "$lib/components/BetaBadge.svelte";
   import { onMount, untrack } from "svelte";
   import type { PageData } from "./$types.js";
   import type { GeocodeResult, RouteData, Stop, StopKind, Trip, TripMember } from "$lib/types.js";
   import { buildPlan, fmtKm, fmtDuration, KIND_LABEL } from "$lib/plan.js";
   import { SESSION_COLORS } from "$lib/colors.js";
+  import { estimateTolls, tollsForLegs, fmtEuro } from "$lib/tolls.js";
   import TripMap from "$lib/components/TripMap.svelte";
   import RouteStrip from "$lib/components/RouteStrip.svelte";
 
@@ -25,6 +27,19 @@
   let mapRef: TripMap | undefined = $state();
 
   const plan = $derived(buildPlan(stops, route, trip.start_date));
+  const tollCost = $derived(estimateTolls(route?.tolls?.sections));
+  const tollTitle = $derived(
+    tollCost
+      ? [
+          ...plan.days.flatMap((d) => {
+            if (d.type !== "drive") return [];
+            const t = tollsForLegs(tollCost, d.legIndices);
+            return t ? [`Tag ${d.dayNumber} (${d.from.name} → ${d.to.name}): ca. ${fmtEuro(t.total)}${t.incomplete ? "+" : ""}`] : [];
+          }),
+          "Grobe Schätzung – Klick zeigt den Rechenweg in der Tagesübersicht.",
+        ].join("\n")
+      : "Gelb markiert auf der Karte",
+  );
 
   // ── Stand vom Server übernehmen ─────────────────────────────
 
@@ -448,6 +463,11 @@
       {#if route}
         <span><strong>{fmtKm(plan.distance)}</strong></span>
         <span><strong>{fmtDuration(plan.duration)}</strong> Fahrzeit</span>
+        {#if route.tolls?.distance}
+          <span class="toll-stat" title={tollTitle}>
+            <strong>{fmtKm(route.tolls.distance)}</strong> Maut{#if tollCost}{" · "}<a href="/trip/{trip.id}/summary#maut">ca. <strong>{fmtEuro(tollCost.total)}</strong>{tollCost.incomplete ? "+" : ""}</a>{/if}<BetaBadge />
+          </span>
+        {/if}
       {/if}
       <span><strong>{plan.driveDays}</strong> Fahrtage</span>
       {#if plan.restDays}<span><strong>{plan.restDays}</strong> Erkundungstag{plan.restDays > 1 ? "e" : ""}</span>{/if}
@@ -742,6 +762,13 @@
   .alert.warn {
     background: #fffbeb;
     color: #92400e;
+  }
+  .toll-stat {
+    cursor: help;
+  }
+  .toll-stat a {
+    color: inherit;
+    text-decoration: underline dotted;
   }
   .alert.info {
     background: #eff6ff;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import BetaBadge from "./BetaBadge.svelte";
   import { onMount, onDestroy } from "svelte";
   import type { RouteData, Stop } from "$lib/types.js";
   import { SESSION_COLORS } from "$lib/colors.js";
@@ -34,6 +35,14 @@
   let layer: any = null;
   let fitted = false;
 
+  // Mautstrecken ein-/ausblenden (Einstellung bleibt im Browser gespeichert)
+  const TOLL_PREF = "roadtrip.showTolls";
+  let showTolls = $state(true);
+  function setShowTolls(v: boolean) {
+    showTolls = v;
+    try { localStorage.setItem(TOLL_PREF, v ? "1" : "0"); } catch { /* egal */ }
+  }
+
   // Drag-auf-der-Strecke-Zustand
   let pending: { legIndex: number; start: any } | null = null;
   let ghost: any = null;
@@ -41,6 +50,7 @@
   let suppressClick = false;
 
   onMount(async () => {
+    try { showTolls = localStorage.getItem(TOLL_PREF) !== "0"; } catch { /* z.B. privater Modus */ }
     L = (await import("leaflet")).default;
     map = L.map(mapEl, { doubleClickZoom: false }).setView([46.5, 11], 6);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -71,7 +81,7 @@
 
   // Neu zeichnen, sobald sich Daten ändern
   $effect(() => {
-    void stops; void route; void legColor; void selectedId; void busy;
+    void stops; void route; void legColor; void selectedId; void busy; void showTolls;
     render();
   });
 
@@ -98,6 +108,13 @@
     layer.clearLayers();
 
     const legsOk = route && route.legs.length === stops.length - 1;
+
+    // -- Mautabschnitte: breiter gelber Rand unter der Strecke ---------
+    if (legsOk && route!.tolls && showTolls) {
+      for (const line of route!.tolls.lines) {
+        L.polyline(line, { color: "#facc15", weight: 16, opacity: 0.75, interactive: false }).addTo(layer);
+      }
+    }
 
     // -- Strecke -----------------------------------------------------
     for (let i = 0; i < stops.length - 1; i++) {
@@ -242,6 +259,12 @@
   {#if busy}
     <div class="busy-badge">Route wird berechnet…</div>
   {/if}
+  {#if route?.tolls?.lines.length}
+    <label class="legend" title="Mautstrecken auf der Karte ein-/ausblenden">
+      <input type="checkbox" checked={showTolls} onchange={(e) => setShowTolls(e.currentTarget.checked)} />
+      <span class="toll-swatch"></span> Mautstrecke · {fmtKm(route.tolls.distance)} <BetaBadge />
+    </label>
+  {/if}
 </div>
 
 <style>
@@ -268,6 +291,32 @@
     padding: 0.35rem 0.8rem;
     border-radius: 999px;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  }
+
+  .legend {
+    position: absolute;
+    left: 10px;
+    bottom: 22px;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: rgba(255, 255, 255, 0.92);
+    border-radius: 6px;
+    padding: 0.25rem 0.55rem;
+    font-size: 0.8rem;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    cursor: pointer;
+    user-select: none;
+  }
+  .legend input {
+    margin: 0;
+  }
+  .toll-swatch {
+    width: 22px;
+    height: 10px;
+    border-radius: 3px;
+    background: linear-gradient(#facc15 0 30%, #1e3a8a 30% 70%, #facc15 70%);
   }
 
   :global(.route-hit) {

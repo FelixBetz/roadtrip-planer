@@ -1,7 +1,9 @@
 <script lang="ts">
+  import BetaBadge from "$lib/components/BetaBadge.svelte";
   import type { PageData } from "./$types.js";
   import { buildPlan, fmtKm, fmtDuration, fmtDate } from "$lib/plan.js";
   import { SESSION_COLORS } from "$lib/colors.js";
+  import { estimateTolls, tollsForLegs, fmtEuro, COUNTRY_NAME, TOLL_RULES, TOLL_SOURCES } from "$lib/tolls.js";
   import RouteStrip from "$lib/components/RouteStrip.svelte";
 
   let { data }: { data: PageData } = $props();
@@ -11,6 +13,17 @@
   const plan = $derived(buildPlan(data.stops, data.route, data.trip.start_date));
   const startDate = $derived(trip.start_date ? new Date(trip.start_date + "T00:00:00") : null);
   const endDate = $derived(plan.days.length ? plan.days[plan.days.length - 1].date : null);
+
+  const tollCost = $derived(estimateTolls(data.route?.tolls?.sections));
+  /** Maut je Fahrtag (nur Tage mit Maut) */
+  const tollDays = $derived(
+    plan.days.flatMap((d) => {
+      if (d.type !== "drive") return [];
+      const t = tollsForLegs(tollCost, d.legIndices);
+      return t ? [{ day: d, toll: t }] : [];
+    }),
+  );
+  const tollFor = (legs: number[]) => tollsForLegs(tollCost, legs);
 
   const color = (i: number) => SESSION_COLORS[i % SESSION_COLORS.length];
 </script>
@@ -62,6 +75,12 @@
         </div>
       {/if}
     </div>
+    {#if tollCost}
+      <p class="tolls">
+        💶 Maut ca. <strong>{fmtEuro(tollCost.total)}{tollCost.incomplete ? "+" : ""}</strong>
+        · <a href="#maut">Aufteilung und Rechenweg</a> <BetaBadge />
+      </p>
+    {/if}
     {#if trip.avoid_highways || trip.avoid_tolls}
       <p class="route-opts">
         Route {[trip.avoid_highways ? "ohne Autobahn" : "", trip.avoid_tolls ? "ohne Maut" : ""].filter(Boolean).join(", ")}
@@ -91,6 +110,10 @@
               <span class="day-stats">
                 {fmtKm(day.distance)} · 🚗 {fmtDuration(day.duration)}
                 {#if day.visitMinutes > 0}<span class="visit">+ {fmtDuration(day.visitMinutes * 60)} Besichtigung</span>{/if}
+                {#if tollFor(day.legIndices)}
+                  {@const t = tollFor(day.legIndices)!}
+                  <a class="day-toll" href="#maut">💶 ca. {fmtEuro(t.total)}{t.incomplete ? "+" : ""}</a>
+                {/if}
               </span>
             {/if}
           </div>
@@ -137,6 +160,63 @@
       {/if}
     {/each}
   </div>
+
+  {#if tollCost}
+    <section class="toll-card" id="maut">
+      <h2>💶 Maut nach Etappen <BetaBadge /></h2>
+      <table>
+        <thead>
+          <tr><th>Etappe</th><th class="land">Land</th><th>Posten</th><th class="calc">Rechnung</th><th class="num">Betrag</th></tr>
+        </thead>
+        <tbody>
+          {#each tollDays as { day, toll }}
+            {#each toll.items as item, k}
+              <tr class:first={k === 0}>
+                {#if k === 0}
+                  <td rowspan={toll.items.length} class="stage">
+                    <strong>Tag {day.dayNumber}</strong><br />{day.from.name} → {day.to.name}
+                  </td>
+                {/if}
+                <td class="land">{COUNTRY_NAME[item.country] ?? item.country}</td>
+                <td>
+                  <span class="land-inline">{COUNTRY_NAME[item.country] ?? item.country}:</span>
+                  {item.label}
+                </td>
+                <td class="calc">{item.calc}</td>
+                <td class="num">{item.euro === null ? "?" : fmtEuro(item.euro, true)}</td>
+              </tr>
+            {/each}
+            <tr class="subtotal">
+              <td colspan="4">Summe Tag {day.dayNumber}</td>
+              <td class="num">{fmtEuro(toll.total, true)}{toll.incomplete ? "+" : ""}</td>
+            </tr>
+          {/each}
+        </tbody>
+        <tfoot>
+          <tr>
+            <td colspan="4">Gesamt (geschätzt)</td>
+            <td class="num">{fmtEuro(tollCost.total, true)}{tollCost.incomplete ? "+" : ""}</td>
+          </tr>
+        </tfoot>
+      </table>
+
+      <h3>So wird gerechnet</h3>
+      <p class="toll-intro">
+        Welche Teile der Strecke mautpflichtig sind und in welchem Land sie liegen, kommt von
+        OpenRouteService (Kartendaten von OpenStreetMap). Echte Tarife kennt der Dienst nicht, deshalb
+        rechnet die App mit Durchschnittswerten (Stand 2026):
+      </p>
+      <ul class="toll-rules">
+        {#each TOLL_RULES as r}
+          <li><strong>{r.country}:</strong> {r.rule}</li>
+        {/each}
+      </ul>
+      <p class="toll-intro">
+        Das ist eine grobe Schätzung. Für den genauen Preis die Mautrechner der Betreiber nutzen. Quellen:
+        {#each TOLL_SOURCES as src, i}<a href={src.url} target="_blank" rel="noopener">{src.label}</a>{i < TOLL_SOURCES.length - 1 ? " · " : ""}{/each}
+      </p>
+    </section>
+  {/if}
 
   <footer class="summary-footer">Tagesübersicht · {trip.name}</footer>
 </div>
@@ -223,6 +303,110 @@
     margin: 1rem 0 0;
     font-size: 0.85rem;
     color: #92400e;
+  }
+  .tolls {
+    margin: 1rem 0 0;
+    font-size: 0.9rem;
+    color: #475569;
+  }
+  .tolls strong {
+    color: #92400e;
+  }
+  .tolls a,
+  .day-toll {
+    color: #92400e;
+  }
+  .day-toll {
+    margin-left: 0.4rem;
+    text-decoration: none;
+  }
+
+  .toll-card {
+    background: white;
+    border-radius: 12px;
+    padding: 1rem 1.25rem;
+    margin-top: 1rem;
+    break-inside: avoid;
+  }
+  .toll-card h2 {
+    margin: 0 0 0.75rem;
+    font-size: 1.1rem;
+  }
+  .toll-card h3 {
+    margin: 1.25rem 0 0.4rem;
+    font-size: 0.95rem;
+  }
+  .toll-card table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  .toll-card th {
+    text-align: left;
+    color: #64748b;
+    font-weight: 600;
+    border-bottom: 2px solid #e2e8f0;
+    padding: 0.3rem 0.5rem;
+  }
+  .toll-card td {
+    padding: 0.3rem 0.5rem;
+    vertical-align: top;
+  }
+  .toll-card tr.first td {
+    border-top: 1px solid #e2e8f0;
+  }
+  .toll-card .stage {
+    color: #1e3a8a;
+  }
+  .toll-card .calc {
+    color: #64748b;
+  }
+  .toll-card .num {
+    text-align: right;
+    white-space: nowrap;
+  }
+  .toll-card .subtotal td {
+    font-weight: 600;
+    color: #475569;
+    padding-bottom: 0.6rem;
+  }
+  .toll-card .subtotal td:first-child {
+    text-align: right;
+  }
+  .toll-card tfoot td {
+    border-top: 2px solid #e2e8f0;
+    font-weight: 800;
+    color: #92400e;
+    padding-top: 0.5rem;
+  }
+  .toll-card tfoot td:first-child {
+    text-align: right;
+  }
+  .toll-intro {
+    font-size: 0.85rem;
+    color: #475569;
+    margin: 0.4rem 0;
+  }
+  .toll-rules {
+    font-size: 0.85rem;
+    color: #334155;
+    margin: 0.25rem 0 0.5rem;
+    padding-left: 1.2rem;
+  }
+  .land-inline {
+    display: none;
+  }
+  @media (max-width: 600px) {
+    .toll-card {
+      padding: 0.75rem;
+    }
+    .toll-card .calc,
+    .toll-card .land {
+      display: none;
+    }
+    .land-inline {
+      display: inline;
+    }
   }
   .alert {
     background: #fef2f2;

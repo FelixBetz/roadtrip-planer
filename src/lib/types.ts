@@ -72,6 +72,24 @@ export interface RouteData {
     distance: number;
     duration: number;
     warning?: string;
+    /** Mautpflichtige Abschnitte (nur mit OpenRouteService bekannt) */
+    tolls?: {
+        lines: [number, number][][]; // [lat, lon]-Linienzüge
+        distance: number;            // Meter
+        /** zusammenhängende Mautabschnitte mit Land (ISO-Code, z.B. „IT“, „?“ = unbekannt) */
+        sections?: TollSection[];
+    };
+}
+
+export interface TollSection {
+    country: string;
+    distance: number; // Meter
+    /** Index in route.legs (Abschnitt zwischen zwei Orten), auf dem dieser Mautabschnitt liegt */
+    leg?: number;
+    /** gleiche Nummer = dieselbe zusammenhängende Mautstrecke (auch wenn sie über mehrere Etappen geht) */
+    part?: number;
+    /** Mittelpunkt [lat, lon] – um bekannte Sondermautstrecken (Brenner, Timmelsjoch …) zu erkennen */
+    at?: [number, number];
 }
 
 export interface GeocodeResult {

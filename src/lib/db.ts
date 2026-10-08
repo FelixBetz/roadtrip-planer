@@ -1,10 +1,22 @@
 import { neon } from '@neondatabase/serverless';
 import { DATABASE_URL } from '$env/static/private';
-import type { User, Trip, NewTrip, Stop, NewStop, RouteData } from './types.js';
+import type { User, Trip, NewTrip, Stop, StopInput, RouteData, TripMember } from './types.js';
 
 const sql = neon(DATABASE_URL);
 
-const TRIP_COLS = 'id, user_id, name, description, start_date, avoid_highways, avoid_tolls, created_at';
+// Reise inkl. Namen von Besitzer und letztem Bearbeiter
+const TRIP_SELECT = `
+    SELECT t.id, t.user_id, t.name, t.description, t.start_date, t.avoid_highways, t.avoid_tolls,
+           t.created_at, t.version, t.stops_version, t.updated_by,
+           ub.username AS updated_by_name, o.username AS owner_name
+    FROM trips t
+    JOIN users o ON o.id = t.user_id
+    LEFT JOIN users ub ON ub.id = t.updated_by`;
+
+/** Wird geworfen, wenn jemand anderes die Ortsliste inzwischen geändert hat. */
+export class VersionConflictError extends Error {
+    constructor() { super('version_conflict'); }
+}
 
 // -- Users ---------------------------------------------------------
 
@@ -57,45 +69,89 @@ export async function deleteExpiredAuthSessions(): Promise<void> {
 
 // -- Trips ---------------------------------------------------------
 
+/** Eigene und mit dem Nutzer geteilte Reisen */
 export async function getUserTrips(userId: number): Promise<Trip[]> {
     return await sql(
-        `SELECT ${TRIP_COLS} FROM trips WHERE user_id = $1 ORDER BY created_at ASC`,
+        `${TRIP_SELECT}
+         WHERE t.user_id = $1
+            OR EXISTS (SELECT 1 FROM trip_members m WHERE m.trip_id = t.id AND m.user_id = $1)
+         ORDER BY t.created_at ASC`,
         [userId],
     ) as Trip[];
 }
 
 export async function getTrip(id: number): Promise<Trip | null> {
-    const rows = await sql(`SELECT ${TRIP_COLS} FROM trips WHERE id = $1`, [id]);
+    const rows = await sql(`${TRIP_SELECT} WHERE t.id = $1`, [id]);
     return (rows[0] as Trip) ?? null;
 }
 
 export async function createTrip(data: NewTrip): Promise<Trip> {
-    const rows = await sql(
-        `INSERT INTO trips (user_id, name, description) VALUES ($1, $2, $3) RETURNING ${TRIP_COLS}`,
-        [data.user_id, data.name, data.description],
-    );
-    return rows[0] as Trip;
+    const rows = await sql`
+        INSERT INTO trips (user_id, name, description, updated_by)
+        VALUES (${data.user_id}, ${data.name}, ${data.description}, ${data.user_id})
+        RETURNING id
+    `;
+    return (await getTrip((rows[0] as { id: number }).id))!;
 }
 
 export type TripUpdate = Partial<Pick<Trip, 'name' | 'description' | 'start_date' | 'avoid_highways' | 'avoid_tolls'>>;
 
-export async function updateTrip(id: number, data: TripUpdate): Promise<Trip | null> {
-    const cur = await getTrip(id);
-    if (!cur) return null;
-    const next = { ...cur, ...data };
-    const rows = await sql(
+/** Ändert nur die übergebenen Felder, damit sich zwei Bearbeiter nicht gegenseitig überschreiben. */
+export async function updateTrip(id: number, data: TripUpdate, userId: number): Promise<Trip | null> {
+    await sql(
         `UPDATE trips
-         SET name = $2, description = $3, start_date = $4, avoid_highways = $5, avoid_tolls = $6
-         WHERE id = $1
-         RETURNING ${TRIP_COLS}`,
-        [id, next.name, next.description, next.start_date, next.avoid_highways, next.avoid_tolls],
+         SET name           = COALESCE($2, name),
+             description    = COALESCE($3, description),
+             start_date     = COALESCE($4, start_date),
+             avoid_highways = COALESCE($5, avoid_highways),
+             avoid_tolls    = COALESCE($6, avoid_tolls),
+             version        = version + 1,
+             updated_by     = $7,
+             updated_at     = NOW()::TEXT
+         WHERE id = $1`,
+        [id, data.name ?? null, data.description ?? null, data.start_date ?? null,
+         data.avoid_highways ?? null, data.avoid_tolls ?? null, userId],
     );
-    return (rows[0] as Trip) ?? null;
+    return getTrip(id);
 }
 
 export async function deleteTrip(id: number): Promise<boolean> {
     const result = await sql`DELETE FROM trips WHERE id = ${id}`;
     return (result as unknown as { rowCount: number }).rowCount > 0;
+}
+
+// -- Mitglieder (gemeinsames Bearbeiten) ------------------------------
+
+export async function isTripMember(tripId: number, userId: number): Promise<boolean> {
+    const rows = await sql`SELECT 1 FROM trip_members WHERE trip_id = ${tripId} AND user_id = ${userId}`;
+    return rows.length > 0;
+}
+
+/** Besitzer zuerst, dann die Mitglieder in der Reihenfolge, in der sie hinzugefügt wurden */
+export async function getTripMembers(tripId: number): Promise<TripMember[]> {
+    return await sql`
+        SELECT u.id AS user_id, u.username, TRUE AS is_owner
+        FROM trips t JOIN users u ON u.id = t.user_id
+        WHERE t.id = ${tripId}
+        UNION ALL
+        SELECT * FROM (
+            SELECT u.id AS user_id, u.username, FALSE AS is_owner
+            FROM trip_members m JOIN users u ON u.id = m.user_id
+            WHERE m.trip_id = ${tripId}
+            ORDER BY m.added_at ASC
+        ) members
+    ` as TripMember[];
+}
+
+export async function addTripMember(tripId: number, userId: number): Promise<void> {
+    await sql`
+        INSERT INTO trip_members (trip_id, user_id) VALUES (${tripId}, ${userId})
+        ON CONFLICT DO NOTHING
+    `;
+}
+
+export async function removeTripMember(tripId: number, userId: number): Promise<void> {
+    await sql`DELETE FROM trip_members WHERE trip_id = ${tripId} AND user_id = ${userId}`;
 }
 
 // -- Route (Cache der berechneten Strecke) ------------------------
@@ -121,36 +177,69 @@ export async function getAllStops(tripId: number): Promise<Stop[]> {
     return rows.map((s) => ({ ...s, lat: Number(s.lat), lon: Number(s.lon) }));
 }
 
-/** Ersetzt alle Stopps einer Reise in einer Transaktion (neue Reihenfolge = Array-Reihenfolge). */
-export async function replaceStops(tripId: number, stops: NewStop[]): Promise<Stop[]> {
-    await sql.transaction([
-        sql`DELETE FROM trip_stops WHERE trip_id = ${tripId}`,
-        ...stops.map((s, i) => sql`
-            INSERT INTO trip_stops (trip_id, position, kind, name, lat, lon, notes, rest_days, rest_notes, visit_minutes)
-            VALUES (${tripId}, ${i + 1}, ${s.kind}, ${s.name}, ${s.lat}, ${s.lon}, ${s.notes},
-                    ${s.rest_days}, ${s.rest_notes}, ${s.visit_minutes})
-        `),
-    ]);
-    return getAllStops(tripId);
+/**
+ * Speichert die Ortsliste (Reihenfolge = Array-Reihenfolge). Bestehende Orte behalten ihre id
+ * und ihre Texte, es werden nur Position und Koordinaten übernommen. Texte ändert updateStop,
+ * so gehen Notizen nicht verloren, wenn gleichzeitig jemand die Route umbaut.
+ *
+ * baseVersion ist die stops_version, auf der der Bearbeiter aufgebaut hat. Hat inzwischen
+ * jemand anderes die Liste geändert, wird nichts gespeichert (VersionConflictError).
+ */
+export async function replaceStops(tripId: number, baseVersion: number, stops: StopInput[], userId: number): Promise<void> {
+    const keep = stops.map((s) => s.id).filter((id): id is number => typeof id === 'number');
+    try {
+        await sql.transaction([
+            // Erst die Version hochzählen (sperrt die Zeile). Passt die Basis nicht, bricht der
+            // ungültige Cast die ganze Transaktion ab.
+            sql`
+                UPDATE trips
+                SET stops_version = CASE WHEN stops_version = ${baseVersion} THEN stops_version + 1
+                                         ELSE ('version_conflict:' || stops_version)::INTEGER END,
+                    version       = version + 1,
+                    updated_by    = ${userId},
+                    updated_at    = NOW()::TEXT
+                WHERE id = ${tripId}
+            `,
+            sql`DELETE FROM trip_stops WHERE trip_id = ${tripId} AND NOT (id = ANY(${keep}::INTEGER[]))`,
+            ...stops.map((s, i) => typeof s.id === 'number'
+                ? sql`
+                    UPDATE trip_stops SET position = ${i + 1}, lat = ${s.lat}, lon = ${s.lon}
+                    WHERE id = ${s.id} AND trip_id = ${tripId}
+                `
+                : sql`
+                    INSERT INTO trip_stops (trip_id, position, kind, name, lat, lon, notes, rest_days, rest_notes, visit_minutes)
+                    VALUES (${tripId}, ${i + 1}, ${s.kind}, ${s.name}, ${s.lat}, ${s.lon}, ${s.notes},
+                            ${s.rest_days}, ${s.rest_notes}, ${s.visit_minutes})
+                `),
+        ]);
+    } catch (e) {
+        if (String((e as Error)?.message).includes('version_conflict')) throw new VersionConflictError();
+        throw e;
+    }
 }
 
 export type StopUpdate = Partial<Pick<Stop, 'name' | 'notes' | 'kind' | 'rest_days' | 'rest_notes' | 'visit_minutes'>>;
 
-export async function updateStop(tripId: number, id: number, data: StopUpdate): Promise<Stop | null> {
-    const current = await sql`SELECT * FROM trip_stops WHERE id = ${id} AND trip_id = ${tripId}`;
-    if (!current[0]) return null;
-    const cur = current[0] as Stop;
-    const rows = await sql`
-        UPDATE trip_stops
-        SET name          = ${data.name ?? cur.name},
-            notes         = ${data.notes ?? cur.notes},
-            kind          = ${data.kind ?? cur.kind},
-            rest_days     = ${data.rest_days ?? cur.rest_days},
-            rest_notes    = ${data.rest_notes ?? cur.rest_notes},
-            visit_minutes = ${data.visit_minutes ?? cur.visit_minutes}
-        WHERE id = ${id} AND trip_id = ${tripId}
-        RETURNING *
-    `;
-    const s = rows[0] as Stop | undefined;
+/** Ändert nur die übergebenen Felder eines Orts. null = Ort gibt es nicht (mehr). */
+export async function updateStop(tripId: number, id: number, data: StopUpdate, userId: number): Promise<Stop | null> {
+    const [rows] = await sql.transaction([
+        sql`
+            UPDATE trip_stops
+            SET name          = COALESCE(${data.name ?? null}, name),
+                notes         = COALESCE(${data.notes ?? null}, notes),
+                kind          = COALESCE(${data.kind ?? null}, kind),
+                rest_days     = COALESCE(${data.rest_days ?? null}::INTEGER, rest_days),
+                rest_notes    = COALESCE(${data.rest_notes ?? null}, rest_notes),
+                visit_minutes = COALESCE(${data.visit_minutes ?? null}::INTEGER, visit_minutes)
+            WHERE id = ${id} AND trip_id = ${tripId}
+            RETURNING *
+        `,
+        sql`
+            UPDATE trips
+            SET version = version + 1, updated_by = ${userId}, updated_at = NOW()::TEXT
+            WHERE id = ${tripId} AND EXISTS (SELECT 1 FROM trip_stops WHERE id = ${id} AND trip_id = ${tripId})
+        `,
+    ]);
+    const s = (rows as Stop[])[0];
     return s ? { ...s, lat: Number(s.lat), lon: Number(s.lon) } : null;
 }

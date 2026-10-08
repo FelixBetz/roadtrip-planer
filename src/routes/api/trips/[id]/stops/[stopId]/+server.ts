@@ -4,7 +4,7 @@ import { requireTrip } from '$lib/server/trip.js';
 import type { StopKind } from '$lib/types.js';
 import type { RequestHandler } from './$types.js';
 
-/** Texte/Ruhetage eines Stopps ändern (ohne Neuberechnung der Route). */
+/** Texte/Erkundungstage eines Stopps ändern (ohne Neuberechnung der Route). */
 export const PATCH: RequestHandler = async ({ locals, params, request }) => {
     const trip = await requireTrip(locals.user, params.id);
     const stopId = parseInt(params.stopId, 10);
@@ -20,7 +20,7 @@ export const PATCH: RequestHandler = async ({ locals, params, request }) => {
     if (body.rest_days !== undefined) data.rest_days = Math.min(30, Math.max(0, Math.round(Number(body.rest_days)) || 0));
     if (body.visit_minutes !== undefined) data.visit_minutes = Math.min(1440, Math.max(0, Math.round(Number(body.visit_minutes)) || 0));
 
-    const stop = await updateStop(trip.id, stopId, data);
-    if (!stop) error(404, 'Stopp nicht gefunden');
+    const stop = await updateStop(trip.id, stopId, data, locals.user!.id);
+    if (!stop) error(404, 'Dieser Ort wurde inzwischen von jemand anderem gelöscht.');
     return json(stop);
 };

@@ -13,6 +13,20 @@ export interface Trip {
     avoid_highways: number; // 0/1
     avoid_tolls: number;    // 0/1
     created_at: string;
+    /** steigt bei jeder Änderung (für den Abgleich zwischen mehreren Bearbeitern) */
+    version: number;
+    /** steigt nur, wenn sich die Liste der Orte ändert (Hinzufügen, Löschen, Reihenfolge, Position) */
+    stops_version: number;
+    /** wer zuletzt etwas geändert hat */
+    updated_by: number | null;
+    updated_by_name: string | null;
+    owner_name: string;
+}
+
+export interface TripMember {
+    user_id: number;
+    username: string;
+    is_owner: boolean;
 }
 
 export type NewTrip = Pick<Trip, 'user_id' | 'name' | 'description'>;
@@ -39,6 +53,9 @@ export interface Stop {
 }
 
 export type NewStop = Omit<Stop, 'id' | 'trip_id' | 'position'>;
+
+/** Eintrag beim Speichern der Ortsliste: bestehende Orte mit id, neue ohne. */
+export type StopInput = NewStop & { id?: number | null };
 
 export interface RouteLeg {
     /** [lat, lon]-Paare, vereinfacht */

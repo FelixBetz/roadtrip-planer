@@ -79,30 +79,54 @@
               {#if trip.description}
                 <span class="tour-desc">{trip.description}</span>
               {/if}
+              {#if trip.user_id !== data.user.id}
+                <span class="shared">👥 geteilt von {trip.owner_name}</span>
+              {/if}
               <span class="tour-date"
                 >{new Date(trip.created_at).toLocaleDateString("de-DE")}</span
               >
             </a>
-            <form
-              method="POST"
-              action="?/delete"
-              use:enhance
-              class="delete-form"
-            >
-              <input type="hidden" name="id" value={trip.id} />
-              <button
-                type="submit"
-                class="delete-btn"
-                onclick={(e) => {
-                  if (
-                    !confirm(
-                      "Reise wirklich löschen? Alle Daten werden entfernt.",
-                    )
-                  )
-                    e.preventDefault();
-                }}>🗑</button
+            {#if trip.user_id === data.user.id}
+              <form
+                method="POST"
+                action="?/delete"
+                use:enhance
+                class="delete-form"
               >
-            </form>
+                <input type="hidden" name="id" value={trip.id} />
+                <button
+                  type="submit"
+                  class="delete-btn"
+                  title="Reise löschen"
+                  onclick={(e) => {
+                    if (
+                      !confirm(
+                        "Reise wirklich löschen? Alle Daten werden entfernt, auch für alle, mit denen du sie geteilt hast.",
+                      )
+                    )
+                      e.preventDefault();
+                  }}>🗑</button
+                >
+              </form>
+            {:else}
+              <form
+                method="POST"
+                action="?/leave"
+                use:enhance
+                class="delete-form"
+              >
+                <input type="hidden" name="id" value={trip.id} />
+                <button
+                  type="submit"
+                  class="delete-btn"
+                  title="Aus meiner Liste entfernen"
+                  onclick={(e) => {
+                    if (!confirm(`Geteilte Reise „${trip.name}“ verlassen? Sie bleibt bei ${trip.owner_name} erhalten.`))
+                      e.preventDefault();
+                  }}>🚪</button
+                >
+              </form>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -281,6 +305,10 @@
   .tour-desc {
     font-size: 0.85rem;
     color: #6b7280;
+  }
+  .shared {
+    font-size: 0.78rem;
+    color: #7c3aed;
   }
   .tour-date {
     font-size: 0.78rem;

@@ -1,5 +1,5 @@
 import { redirect, fail } from '@sveltejs/kit';
-import { getUserTrips, createTrip, deleteTrip, getTrip } from '$lib/db.js';
+import { getUserTrips, createTrip, deleteTrip, getTrip, removeTripMember } from '$lib/db.js';
 import type { PageServerLoad, Actions } from './$types.js';
 
 export const load: PageServerLoad = async ({ locals }) => {
@@ -27,5 +27,14 @@ export const actions: Actions = {
 		if (!trip || trip.user_id !== user.id) return fail(403, { deleteError: 'Nicht berechtigt.' });
 		await deleteTrip(id);
 		return { deleted: true };
+	},
+	/** Geteilte Reise aus der eigenen Liste entfernen (die Reise selbst bleibt beim Besitzer) */
+	leave: async ({ locals, request }) => {
+		const user = locals.user!;
+		const data = await request.formData();
+		const id = parseInt(String(data.get('id') ?? ''), 10);
+		if (isNaN(id)) return fail(400, { deleteError: 'Invalid trip id.' });
+		await removeTripMember(id, user.id);
+		return { left: true };
 	},
 };

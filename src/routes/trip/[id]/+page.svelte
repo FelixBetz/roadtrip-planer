@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { onMount, untrack } from "svelte";
   import type { PageData } from "./$types.js";
-  import type { GeocodeResult, RouteData, Stop, StopKind, Trip } from "$lib/types.js";
+  import type { GeocodeResult, RouteData, Stop, StopKind, Trip, TripMember } from "$lib/types.js";
   import { buildPlan, fmtKm, fmtDuration, KIND_LABEL } from "$lib/plan.js";
   import { SESSION_COLORS } from "$lib/colors.js";
   import TripMap from "$lib/components/TripMap.svelte";
@@ -12,24 +12,97 @@
   // Lokaler, editierbarer Zustand (Startwerte aus dem Server-Load)
   // (bewusst nur der Startwert – danach kommen Änderungen aus den API-Antworten)
   const initial = untrack(() => structuredClone(data));
+  const me = initial.me;
   let trip = $state<Trip>(initial.trip);
   let stops = $state<Stop[]>(initial.stops);
   let route = $state<RouteData | null>(initial.route);
   let routeError = $state<string | null>(initial.routeError);
   let busy = $state(false);
   let saveError = $state<string | null>(null);
+  let notice = $state<string | null>(null);
   let selectedId = $state<number | null>(null);
 
   let mapRef: TripMap | undefined = $state();
 
   const plan = $derived(buildPlan(stops, route, trip.start_date));
 
+  // ── Stand vom Server übernehmen ─────────────────────────────
+
+  interface TripState {
+    trip: Trip;
+    stops: Stop[];
+    route: RouteData | null;
+    routeError: string | null;
+  }
+
+  /** Zählt eigene Änderungen, damit eine ältere Abgleich-Antwort sie nicht überschreibt */
+  let localSeq = 0;
+
+  function applyState(s: TripState) {
+    trip = s.trip;
+    stops = s.stops;
+    route = s.route;
+    routeError = s.routeError;
+    if (selectedId !== null && !stops.some((x) => x.id === selectedId)) selectedId = null;
+  }
+
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  function showNotice(text: string, ms = 6000) {
+    notice = text;
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => (notice = null), ms);
+  }
+
+  const who = (t: Trip) => (t.updated_by && t.updated_by !== me ? (t.updated_by_name ?? "Jemand") : "Jemand");
+
+  // ── Automatischer Abgleich mit anderen Bearbeitern ───────────
+
+  const POLL_MS = 8000;
+
+  /** Während jemand in ein Feld tippt, nichts von außen überschreiben */
+  function isEditing(): boolean {
+    const el = document.activeElement;
+    return !!el && el.matches("input:not([type=search]), textarea, select") && !!el.closest(".page");
+  }
+
+  async function refresh() {
+    if (busy || document.hidden || isEditing()) return;
+    const seq = localSeq;
+    try {
+      const res = await fetch(`/api/trips/${trip.id}?v=${trip.version}`);
+      if (res.status !== 200 || seq !== localSeq || busy || isEditing()) return;
+      const s = (await res.json()) as TripState;
+      const byOther = s.trip.updated_by !== null && s.trip.updated_by !== me;
+      applyState(s);
+      if (byOther) showNotice(`🔄 ${who(s.trip)} hat gerade etwas geändert. Du siehst jetzt den aktuellen Stand.`);
+    } catch {
+      // offline o.ä. – beim nächsten Mal wieder versuchen
+    }
+  }
+
+  onMount(() => {
+    const timer = setInterval(refresh, POLL_MS);
+    const onVisible = () => { if (!document.hidden) refresh(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", refresh);
+    // Nach dem Verlassen eines Eingabefelds gleich nachsehen, ob inzwischen etwas passiert ist
+    const onFocusOut = () => setTimeout(refresh, 300);
+    document.addEventListener("focusout", onFocusOut);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("focusout", onFocusOut);
+    };
+  });
+
   // ── Speichern ──────────────────────────────────────────────
 
-  type StopDraft = Omit<Stop, "id" | "trip_id" | "position">;
+  type StopDraft = Omit<Stop, "id" | "trip_id" | "position"> & { id: number | null };
 
   function draft(s: Partial<Stop> & Pick<Stop, "lat" | "lon">): StopDraft {
     return {
+      id: s.id ?? null,
       kind: s.kind ?? "stage",
       name: s.name ?? "",
       lat: s.lat,
@@ -41,21 +114,34 @@
     };
   }
 
-  /** Komplette Liste speichern + Route neu berechnen. selectIndex = welcher Stopp danach ausgewählt ist. */
+  /**
+   * Komplette Liste speichern + Route neu berechnen. select = welcher Ort danach ausgewählt ist
+   * (Index in der Liste). Hat inzwischen jemand anderes die Orte geändert, lehnt der Server ab
+   * und schickt den aktuellen Stand – dann wird nichts überschrieben.
+   */
   async function saveStops(list: StopDraft[], selectIndex: number | null = null) {
     busy = true;
     saveError = null;
+    localSeq++;
     try {
       const res = await fetch(`/api/trips/${trip.id}/stops`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(list),
+        body: JSON.stringify({ baseVersion: trip.stops_version, stops: list }),
       });
+      if (res.status === 409) {
+        const s = (await res.json()) as TripState;
+        applyState(s);
+        showNotice(
+          `⚠️ ${who(s.trip)} hat die Route gerade geändert. Deine letzte Änderung wurde deshalb nicht gespeichert. ` +
+            `Du siehst jetzt den aktuellen Stand, bitte mach sie nochmal.`,
+          12000,
+        );
+        return;
+      }
       if (!res.ok) throw new Error((await res.json().catch(() => null))?.message ?? res.statusText);
-      const json = await res.json();
-      stops = json.stops;
-      route = json.route;
-      routeError = json.routeError;
+      const json = (await res.json()) as TripState;
+      applyState(json);
       selectedId = selectIndex !== null ? (stops[selectIndex]?.id ?? null) : null;
     } catch (e) {
       saveError = `Speichern fehlgeschlagen: ${(e as Error).message}`;
@@ -68,17 +154,25 @@
 
   async function patchStop(s: Stop, fields: Partial<Stop>) {
     Object.assign(s, fields);
+    localSeq++;
     const res = await fetch(`/api/trips/${trip.id}/stops/${s.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(fields),
     });
-    if (!res.ok) saveError = "Änderung konnte nicht gespeichert werden.";
+    if (res.status === 404) {
+      showNotice("⚠️ Dieser Ort wurde inzwischen von jemand anderem gelöscht.", 10000);
+      trip.version = -1; // erzwingt beim nächsten Abgleich den kompletten Stand
+      refresh();
+    } else if (!res.ok) {
+      saveError = "Änderung konnte nicht gespeichert werden.";
+    }
   }
 
   async function patchTrip(fields: Partial<Trip> | Record<string, unknown>) {
     busy = true;
     saveError = null;
+    localSeq++;
     try {
       const res = await fetch(`/api/trips/${trip.id}`, {
         method: "PATCH",
@@ -86,15 +180,56 @@
         body: JSON.stringify(fields),
       });
       if (!res.ok) throw new Error(res.statusText);
-      const json = await res.json();
-      trip = json.trip;
-      route = json.route;
-      routeError = json.routeError;
+      applyState(await res.json());
     } catch (e) {
       saveError = `Speichern fehlgeschlagen: ${(e as Error).message}`;
     } finally {
       busy = false;
     }
+  }
+
+  // ── Teilen ────────────────────────────────────────────────
+
+  let shareOpen = $state(false);
+  let members = $state<TripMember[]>([]);
+  let shareName = $state("");
+  let shareError = $state<string | null>(null);
+  const isOwner = $derived(trip.user_id === me);
+
+  async function membersCall(method: "GET" | "POST" | "DELETE", body?: unknown, query = "") {
+    shareError = null;
+    const res = await fetch(`/api/trips/${trip.id}/members${query}`, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) {
+      shareError = (await res.json().catch(() => null))?.message ?? res.statusText;
+      return false;
+    }
+    members = await res.json();
+    return true;
+  }
+
+  function toggleShare() {
+    shareOpen = !shareOpen;
+    if (shareOpen) membersCall("GET");
+  }
+
+  async function addMember(e: SubmitEvent) {
+    e.preventDefault();
+    if (!shareName.trim()) return;
+    if (await membersCall("POST", { username: shareName.trim() })) shareName = "";
+  }
+
+  async function removeMember(m: TripMember) {
+    if (m.user_id === me) {
+      if (!confirm(`Reise „${trip.name}“ verlassen? Sie bleibt bei ${trip.owner_name} erhalten.`)) return;
+      if (await membersCall("DELETE", undefined, `?user=${m.user_id}`)) location.href = "/";
+      return;
+    }
+    if (!confirm(`${m.username} aus der Reise entfernen?`)) return;
+    await membersCall("DELETE", undefined, `?user=${m.user_id}`);
   }
 
   // ── Aktionen ───────────────────────────────────────────────
@@ -250,6 +385,34 @@
       onchange={(e) => patchTrip({ name: e.currentTarget.value })}
       aria-label="Name der Reise"
     />
+    <div class="share-wrap">
+      <button class="share-btn" onclick={toggleShare} aria-expanded={shareOpen}>👥 Teilen</button>
+      {#if shareOpen}
+        <div class="share-panel">
+          <h3>Wer plant mit?</h3>
+          <ul class="members">
+            {#each members as m (m.user_id)}
+              <li>
+                <span>{m.username}{m.user_id === me ? " (du)" : ""}</span>
+                {#if m.is_owner}
+                  <span class="role">Besitzer</span>
+                {:else if isOwner || m.user_id === me}
+                  <button class="link" onclick={() => removeMember(m)}>{m.user_id === me ? "Verlassen" : "Entfernen"}</button>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+          {#if isOwner}
+            <form class="share-form" onsubmit={addMember}>
+              <input bind:value={shareName} placeholder="Benutzername" aria-label="Benutzername" />
+              <button type="submit">Hinzufügen</button>
+            </form>
+            <p class="share-hint">Die Person muss sich vorher selbst registriert haben. Danach sieht sie die Reise in ihrer Liste und kann mitplanen.</p>
+          {/if}
+          {#if shareError}<p class="share-error">{shareError}</p>{/if}
+        </div>
+      {/if}
+    </div>
     <a class="summary-link" href="/trip/{trip.id}/summary">📅 Tagesübersicht</a>
   </header>
 
@@ -287,7 +450,7 @@
         <span><strong>{fmtDuration(plan.duration)}</strong> Fahrzeit</span>
       {/if}
       <span><strong>{plan.driveDays}</strong> Fahrtage</span>
-      {#if plan.restDays}<span><strong>{plan.restDays}</strong> Ruhetage</span>{/if}
+      {#if plan.restDays}<span><strong>{plan.restDays}</strong> Erkundungstag{plan.restDays > 1 ? "e" : ""}</span>{/if}
     </div>
   </section>
 
@@ -299,6 +462,9 @@
   {/if}
   {#if saveError}
     <p class="alert error">{saveError}</p>
+  {/if}
+  {#if notice}
+    <p class="alert info">{notice}</p>
   {/if}
 
   <div class="main">
@@ -349,7 +515,7 @@
                   <span class="stop-sub">
                     {isFirst ? "Start" : isLast ? "Ziel" : KIND_LABEL[s.kind]}
                     {#if s.kind === "stage" && !isFirst}· {dayLabelFor(s)}{/if}
-                    {#if s.kind === "stage" && s.rest_days > 0 && !isLast}· +{s.rest_days} Ruhetag{s.rest_days > 1 ? "e" : ""}{/if}
+                    {#if s.kind === "stage" && s.rest_days > 0 && !isLast}· +{s.rest_days} Erkundungstag{s.rest_days > 1 ? "e" : ""}{/if}
                     {#if s.notes}· 📝{/if}
                   </span>
                 </button>
@@ -397,7 +563,7 @@
                   </label>
                   {#if s.kind === "stage" && !isLast}
                     <label>
-                      Ruhetage hier
+                      Erkundungstage hier
                       <input
                         type="number" min="0" max="30"
                         value={s.rest_days}
@@ -406,7 +572,7 @@
                     </label>
                     {#if s.rest_days > 0}
                       <label>
-                        Programm an den Ruhetagen
+                        Programm an den Erkundungstagen
                         <textarea
                           rows="3"
                           placeholder="z.B. Altstadt anschauen, Ötzi-Museum…"
@@ -576,6 +742,101 @@
   .alert.warn {
     background: #fffbeb;
     color: #92400e;
+  }
+  .alert.info {
+    background: #eff6ff;
+    color: #1e40af;
+  }
+
+  .share-wrap {
+    position: relative;
+    margin-left: auto;
+  }
+  .share-wrap + .summary-link {
+    margin-left: 0;
+  }
+  .share-btn {
+    border: 1px solid #cbd5e1;
+    background: white;
+    border-radius: 8px;
+    padding: 0.45rem 0.8rem;
+    font: inherit;
+    font-size: 0.9rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .share-panel {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 6px);
+    z-index: 1100;
+    width: 300px;
+    background: white;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+    padding: 0.75rem 0.9rem;
+    font-size: 0.9rem;
+  }
+  .share-panel h3 {
+    margin: 0 0 0.5rem;
+    font-size: 0.95rem;
+  }
+  .members {
+    list-style: none;
+    margin: 0 0 0.6rem;
+    padding: 0;
+  }
+  .members li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.25rem 0;
+    border-bottom: 1px solid #f1f5f9;
+  }
+  .role {
+    font-size: 0.75rem;
+    color: #64748b;
+  }
+  .link {
+    border: none;
+    background: none;
+    color: #dc2626;
+    font: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+    padding: 0;
+  }
+  .share-form {
+    display: flex;
+    gap: 0.4rem;
+  }
+  .share-form input {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 0.35rem 0.5rem;
+    font: inherit;
+  }
+  .share-form button {
+    border: none;
+    background: #2563eb;
+    color: white;
+    border-radius: 6px;
+    padding: 0.35rem 0.7rem;
+    font: inherit;
+    cursor: pointer;
+  }
+  .share-hint {
+    margin: 0.5rem 0 0;
+    font-size: 0.78rem;
+    color: #64748b;
+  }
+  .share-error {
+    margin: 0.5rem 0 0;
+    color: #b91c1c;
+    font-size: 0.85rem;
   }
 
   .main {

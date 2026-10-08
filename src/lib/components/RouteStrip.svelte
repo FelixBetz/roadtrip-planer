@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { RouteData, Stop } from "$lib/types.js";
   import type { TripPlan } from "$lib/plan.js";
-  import { fmtKm, fmtDuration } from "$lib/plan.js";
+  import { fmtKm, fmtDuration, fmtDate } from "$lib/plan.js";
   import { SESSION_COLORS } from "$lib/colors.js";
 
   interface Props {
@@ -69,52 +69,96 @@
       });
   });
 
-  /** Ruhetage pro Etappenziel (für Badge) */
+  /** Erkundungstage pro Etappenziel (für Badge) */
   function restDaysAt(s: Stop, index: number): number {
     return index > 0 && index < stops.length - 1 && s.kind === "stage" ? s.rest_days : 0;
   }
 
-  function dayNumbersArriving(s: Stop): string {
-    const d = plan.days.find((d) => d.type === "drive" && d.to === s);
-    return d ? `Tag ${d.dayNumber}` : "";
+  /** Datum(e) der Erkundungstage an einem Etappenziel, z.B. „Mi., 02.06.“ oder „Mi., 02.06. – Do., 03.06.“ */
+  function restDatesAt(s: Stop): string {
+    const dates = plan.days.filter((d) => d.type === "rest" && d.at === s).map((d) => d.date);
+    if (!dates.length || !dates[0]) return "";
+    const first = fmtDate(dates[0]);
+    return dates.length > 1 ? `${first} – ${fmtDate(dates[dates.length - 1])}` : first;
   }
 
-  // Breite: mindestens ~120px pro sichtbarem Punkt, damit Beschriftungen Platz haben
-  const minWidth = $derived(Math.max(600, nodes.length * 120));
+  const startDate = $derived(plan.days[0]?.date ?? null);
+
+  function dayNumbersArriving(s: Stop): string {
+    const d = plan.days.find((d) => d.type === "drive" && d.to === s);
+    if (!d) return "";
+    return d.date ? `Tag ${d.dayNumber} · ${fmtDate(d.date)}` : `Tag ${d.dayNumber}`;
+  }
+
+  // Kein horizontales Scrollen: die Leiste passt sich der Breite an. Liegen Beschriftungen
+  // zu dicht beieinander, werden sie auf mehrere Zeilen verteilt.
+  const PAD = 56; // Platz links/rechts für die Beschriftungen an den Enden
+  let width = $state(0);
+  const trackPx = $derived(Math.max(1, width - 2 * PAD));
+
+  /** Weist jedem Punkt die erste Zeile zu, in der seine Beschriftung nicht mit der vorherigen kollidiert. */
+  function assignRows(xs: number[], labelPx: number): number[] {
+    const lastEnd: number[] = [];
+    return xs.map((x) => {
+      const px = x * trackPx;
+      let row = lastEnd.findIndex((end) => px - labelPx / 2 >= end);
+      if (row === -1) row = lastEnd.length;
+      lastEnd[row] = px + labelPx / 2;
+      return row;
+    });
+  }
+
+  const bottomNodes = $derived(nodes.filter((n) => n.stop.kind !== "poi" || n.isEnd));
+  const topNodes = $derived(nodes.filter((n) => n.stop.kind === "poi" && !n.isEnd));
+  const bottomRows = $derived(assignRows(bottomNodes.map((n) => n.x), 118));
+  const topRows = $derived(assignRows(topNodes.map((n) => n.x), 112));
+  const BOTTOM_ROW_H = 62;
+  const TOP_ROW_H = 30;
+  // Höhe der untersten Beschriftungszeile: mit Erkundungstag-Badge + Datum ist sie höher
+  const bottomHeight = $derived.by(() => {
+    if (!bottomNodes.length) return 40;
+    const maxRow = Math.max(...bottomRows);
+    const lastRowHasRest = bottomNodes.some((n, k) => bottomRows[k] === maxRow && restDaysAt(n.stop, n.index) > 0);
+    return maxRow * BOTTOM_ROW_H + (lastRowHasRest ? 66 : 40);
+  });
+  const topHeight = $derived(topNodes.length ? (Math.max(...topRows) + 1) * TOP_ROW_H + 8 : 8);
 </script>
 
 {#if nodes.length >= 2}
-  <div class="strip-scroll">
-    <div class="strip" style="min-width:{minWidth}px">
+  <div class="strip-wrap">
+    <div class="strip" style="padding: 0 {PAD}px" bind:clientWidth={width}>
       <!-- Tagesklammern -->
       <div class="bands">
         {#each dayBands as b}
+          {@const bandPx = (b.x2 - b.x1) * trackPx}
           <div
             class="band"
             style="left:{b.x1 * 100}%; width:{(b.x2 - b.x1) * 100}%; --c:{b.color}"
             title="{fmtKm(b.day.distance)} · {fmtDuration(b.day.duration)}"
           >
-            <span>Tag {b.day.dayNumber}</span>
+            {#if bandPx >= 44}
+              <span>
+                Tag {b.day.dayNumber}{#if legsOk && bandPx >= 100}{" · "}{fmtKm(b.day.distance)}{/if}{#if legsOk && bandPx >= 170}{" · "}{fmtDuration(b.day.duration)}{/if}
+              </span>
+            {/if}
           </div>
         {/each}
       </div>
 
       <!-- Zwischenziel-Beschriftungen (oben) -->
-      <div class="labels top">
-        {#each nodes as n}
-          {#if n.stop.kind === "poi" && !n.isEnd}
-            <button
-              class="label poi"
-              class:selected={n.stop.id === selectedId}
-              style="left:{n.x * 100}%"
-              onclick={() => onSelect?.(n.stop.id)}
-            >
-              📍 {n.stop.name}
-              {#if n.stop.visit_minutes}
-                <small>{fmtDuration(n.stop.visit_minutes * 60)} Aufenthalt</small>
-              {/if}
-            </button>
-          {/if}
+      <div class="labels top" style="height:{topHeight}px">
+        {#each topNodes as n, k}
+          <button
+            class="label poi"
+            class:selected={n.stop.id === selectedId}
+            style="left:{n.x * 100}%; bottom:{2 + topRows[k] * TOP_ROW_H}px"
+            onclick={() => onSelect?.(n.stop.id)}
+          >
+            📍 {n.stop.name}
+            {#if n.stop.visit_minutes}
+              <small>{fmtDuration(n.stop.visit_minutes * 60)} Aufenthalt</small>
+            {/if}
+          </button>
         {/each}
       </div>
 
@@ -122,7 +166,7 @@
       <div class="track">
         {#each gaps as g}
           <div class="seg" style="left:{g.x1 * 100}%; width:{(g.x2 - g.x1) * 100}%; background:{g.color}">
-            {#if legsOk}
+            {#if legsOk && (g.x2 - g.x1) * trackPx >= 46}
               <span class="seg-info">{fmtKm(g.distance)}<br />{fmtDuration(g.duration)}</span>
             {/if}
           </div>
@@ -142,23 +186,27 @@
       </div>
 
       <!-- Etappenziel-Beschriftungen (unten) -->
-      <div class="labels bottom">
-        {#each nodes as n}
-          {#if n.stop.kind !== "poi" || n.isEnd}
+      <div class="labels bottom" style="height:{bottomHeight}px">
+        {#each bottomNodes as n, k}
             {@const rest = restDaysAt(n.stop, n.index)}
             <button
               class="label stage"
               class:selected={n.stop.id === selectedId}
-              style="left:{n.x * 100}%"
+              style="left:{n.x * 100}%; top:{4 + bottomRows[k] * BOTTOM_ROW_H}px"
               onclick={() => onSelect?.(n.stop.id)}
             >
               <strong>{n.index === 0 ? "🚩" : n.index === stops.length - 1 ? "🏁" : "🏨"} {n.stop.name}</strong>
-              {#if n.index > 0}<small>{dayNumbersArriving(n.stop)}</small>{/if}
+              {#if n.index > 0}
+                <small>{dayNumbersArriving(n.stop)}</small>
+              {:else if startDate}
+                <small>Abfahrt {fmtDate(startDate)}</small>
+              {/if}
               {#if rest > 0}
-                <span class="rest">+{rest} Ruhetag{rest > 1 ? "e" : ""}</span>
+                {@const restDates = restDatesAt(n.stop)}
+                <span class="rest">+{rest} Erkundungstag{rest > 1 ? "e" : ""}</span>
+                {#if restDates}<small class="rest-date">{restDates}</small>{/if}
               {/if}
             </button>
-          {/if}
         {/each}
       </div>
     </div>
@@ -168,13 +216,12 @@
 {/if}
 
 <style>
-  .strip-scroll {
-    overflow-x: auto;
+  .strip-wrap {
+    overflow: hidden;
     padding: 0.25rem 0 0.5rem;
   }
   .strip {
     position: relative;
-    padding: 0 70px; /* Platz für die Beschriftung an den Enden */
     box-sizing: border-box;
   }
   .bands,
@@ -208,12 +255,6 @@
     white-space: nowrap;
   }
 
-  .labels.top {
-    height: 42px;
-  }
-  .labels.bottom {
-    height: 64px;
-  }
   .label {
     position: absolute;
     transform: translateX(-50%);
@@ -241,14 +282,13 @@
     font-size: 0.7rem;
   }
   .labels.top .label {
-    bottom: 2px;
     color: #9d174d;
-  }
-  .labels.bottom .label {
-    top: 4px;
   }
   .label.selected {
     background: #fef3c7;
+  }
+  .label small.rest-date {
+    color: #92400e;
   }
   .rest {
     margin-top: 2px;

@@ -75,4 +75,21 @@ await sql`
     )
 `;
 
+// Gemeinsames Bearbeiten: Versionsnummern + wer zuletzt geändert hat.
+// ADD COLUMN IF NOT EXISTS, damit das Skript auch auf einer bestehenden Datenbank läuft.
+await sql`ALTER TABLE trips ADD COLUMN IF NOT EXISTS version       INTEGER NOT NULL DEFAULT 1`;
+await sql`ALTER TABLE trips ADD COLUMN IF NOT EXISTS stops_version INTEGER NOT NULL DEFAULT 1`;
+await sql`ALTER TABLE trips ADD COLUMN IF NOT EXISTS updated_by    INTEGER REFERENCES users(id) ON DELETE SET NULL`;
+await sql`ALTER TABLE trips ADD COLUMN IF NOT EXISTS updated_at    TEXT NOT NULL DEFAULT (NOW()::TEXT)`;
+
+// Mit wem eine Reise geteilt ist (der Besitzer steht in trips.user_id)
+await sql`
+    CREATE TABLE IF NOT EXISTS trip_members (
+        trip_id  INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+        user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        added_at TEXT    NOT NULL DEFAULT (NOW()::TEXT),
+        PRIMARY KEY (trip_id, user_id)
+    )
+`;
+
 console.log('Database schema created successfully.');

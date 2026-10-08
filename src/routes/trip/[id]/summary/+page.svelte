@@ -47,7 +47,7 @@
       </div>
       <div class="cstat">
         <span class="cval">{plan.restDays}</span>
-        <span class="clabel">Ruhetage</span>
+        <span class="clabel">Erkundungstage</span>
       </div>
       <div class="cstat">
         <span class="cval">{plan.days.length}</span>
@@ -80,79 +80,59 @@
   <div class="days">
     {#each plan.days as day}
       {#if day.type === "drive"}
-        <article class="day-card">
-          <div class="day-bar" style="background:{color(day.colorIndex)}"></div>
-          <div class="day-body">
-            <div class="day-top">
-              <div>
-                <h2 class="day-name">Tag {day.dayNumber} <span class="stage-no">· Etappe {day.stageNumber}</span></h2>
-                {#if day.date}<span class="day-date">{fmtDate(day.date, true)}</span>{/if}
-                <p class="day-route">{day.from.name} → {day.to.name}</p>
-              </div>
-              <div class="badges">
-                {#if data.route}
-                  <span class="badge km">{fmtKm(day.distance)}</span>
-                  <span class="badge time">🚗 {fmtDuration(day.duration)}</span>
-                  {#if day.visitMinutes > 0}
-                    <span class="badge visit">+ {fmtDuration(day.visitMinutes * 60)} Besichtigung</span>
-                  {/if}
-                {/if}
-              </div>
-            </div>
-
-            <!-- Tagesverlauf -->
-            <ol class="timeline">
-              <li class="tl-stop">
-                <span class="tl-dot start" style="border-color:{color(day.colorIndex)}"></span>
-                <strong>{day.from.name}</strong>
-                <span class="tl-meta">Abfahrt</span>
-              </li>
-              {#each day.pois as p}
-                <li class="tl-leg">
-                  {fmtKm(p.fromPrevDistance)} · {fmtDuration(p.fromPrevDuration)}
-                </li>
-                <li class="tl-stop poi">
-                  <span class="tl-dot poi"></span>
-                  <strong>📍 {p.stop.name}</strong>
-                  <span class="tl-meta">
-                    nach {fmtDuration(p.fromDayStartDuration)} ab {day.from.name}
-                    {#if p.stop.visit_minutes}· {fmtDuration(p.stop.visit_minutes * 60)} Aufenthalt{/if}
-                  </span>
-                  {#if p.stop.notes}<p class="notes">{p.stop.notes}</p>{/if}
-                </li>
-              {/each}
-              <li class="tl-leg">
-                {fmtKm(day.lastLegDistance)} · {fmtDuration(day.lastLegDuration)}
-              </li>
-              <li class="tl-stop">
-                <span class="tl-dot end" style="background:{color(day.colorIndex)}"></span>
-                <strong>{day.to === stops[stops.length - 1] ? "🏁" : "🏨"} {day.to.name}</strong>
-                <span class="tl-meta">Ankunft{day.to === stops[stops.length - 1] ? " · Ziel" : " · Übernachtung"}</span>
-                {#if day.to.notes}<p class="notes">{day.to.notes}</p>{/if}
-              </li>
-            </ol>
-          </div>
-        </article>
-      {:else}
-        <article class="day-card rest">
-          <div class="day-bar rest-bar"></div>
-          <div class="day-body">
-            <div class="day-top">
-              <div>
-                <h2 class="day-name">Tag {day.dayNumber}</h2>
-                {#if day.date}<span class="day-date">{fmtDate(day.date, true)}</span>{/if}
-                <p class="day-route">Ruhetag in {day.at.name}</p>
-              </div>
-              <div class="badges">
-                <span class="badge rest-badge">
-                  🏛️ Ruhetag{day.restCount > 1 ? ` ${day.restIndex}/${day.restCount}` : ""}
-                </span>
-              </div>
-            </div>
-            {#if day.at.rest_notes && day.restIndex === 1}
-              <p class="notes">{day.at.rest_notes}</p>
+        {@const isFinal = day.to === stops[stops.length - 1]}
+        {@const startNotes = day.from === stops[0] ? day.from.notes : ""}
+        <article class="day" style="--c:{color(day.colorIndex)}">
+          <div class="day-head">
+            <span class="day-no">Tag {day.dayNumber}</span>
+            {#if day.date}<span class="day-date">{fmtDate(day.date)}</span>{/if}
+            <span class="day-route">{day.from.name} → {isFinal ? "🏁" : "🏨"} {day.to.name}</span>
+            {#if data.route}
+              <span class="day-stats">
+                {fmtKm(day.distance)} · 🚗 {fmtDuration(day.duration)}
+                {#if day.visitMinutes > 0}<span class="visit">+ {fmtDuration(day.visitMinutes * 60)} Besichtigung</span>{/if}
+              </span>
             {/if}
           </div>
+
+          {#if startNotes || day.pois.length || day.to.notes}
+            <ul class="day-items">
+              {#if startNotes}
+                <li>
+                  <span class="item-name">🚩 {day.from.name}</span>
+                  <span class="item-notes">{startNotes}</span>
+                </li>
+              {/if}
+              {#each day.pois as p}
+                <li>
+                  <span class="item-name">📍 {p.stop.name}</span>
+                  <span class="item-meta">
+                    {fmtDuration(p.fromDayStartDuration)} ab {day.from.name}{#if p.stop.visit_minutes}{" · "}{fmtDuration(p.stop.visit_minutes * 60)} Aufenthalt{/if}
+                  </span>
+                  {#if p.stop.notes}<span class="item-notes">{p.stop.notes}</span>{/if}
+                </li>
+              {/each}
+              {#if day.to.notes}
+                <li>
+                  <span class="item-name">{isFinal ? "🏁" : "🏨"} {day.to.name}</span>
+                  <span class="item-notes">{day.to.notes}</span>
+                </li>
+              {/if}
+            </ul>
+          {/if}
+        </article>
+      {:else}
+        <article class="day rest">
+          <div class="day-head">
+            <span class="day-no">Tag {day.dayNumber}</span>
+            {#if day.date}<span class="day-date">{fmtDate(day.date)}</span>{/if}
+            <span class="day-route">🏛️ Erkundungstag in {day.at.name}{#if day.restCount > 1} ({day.restIndex}/{day.restCount}){/if}</span>
+          </div>
+          {#if day.at.rest_notes && day.restIndex === 1}
+            <ul class="day-items">
+              <li><span class="item-notes">{day.at.rest_notes}</span></li>
+            </ul>
+          {/if}
         </article>
       {/if}
     {/each}
@@ -261,135 +241,85 @@
   .days {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 0.4rem;
   }
-  .day-card {
-    display: flex;
+  .day {
     background: white;
-    border-radius: 12px;
-    overflow: hidden;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    border-left: 5px solid var(--c);
+    border-radius: 8px;
+    padding: 0.5rem 0.85rem;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
     break-inside: avoid;
   }
-  .day-bar {
-    width: 6px;
-    flex-shrink: 0;
+  .day.rest {
+    border-left: 5px solid #f59e0b;
+    background: #fffdf5;
   }
-  .rest-bar {
-    background: repeating-linear-gradient(45deg, #f59e0b, #f59e0b 6px, #fde68a 6px, #fde68a 12px);
-  }
-  .day-body {
-    flex: 1;
-    padding: 1rem 1.25rem;
-  }
-  .day-top {
+  .day-head {
     display: flex;
-    justify-content: space-between;
-    gap: 1rem;
     flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.2rem 0.75rem;
   }
-  .day-name {
-    margin: 0;
-    font-size: 1.15rem;
-  }
-  .stage-no {
-    font-weight: 500;
-    color: #64748b;
-    font-size: 0.95rem;
+  .day-no {
+    font-weight: 800;
+    min-width: 3.6rem;
   }
   .day-date {
     font-size: 0.85rem;
     color: #64748b;
+    min-width: 5.5rem;
   }
   .day-route {
-    margin: 0.25rem 0 0;
     font-weight: 600;
     color: #1e3a8a;
   }
-  .badges {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.4rem;
-    align-items: flex-start;
-  }
-  .badge {
-    font-size: 0.8rem;
-    font-weight: 600;
-    padding: 0.2rem 0.6rem;
-    border-radius: 999px;
+  .day-stats {
+    margin-left: auto;
+    font-size: 0.85rem;
+    color: #475569;
     white-space: nowrap;
   }
-  .badge.km {
-    background: #dbeafe;
-    color: #1e40af;
-  }
-  .badge.time {
-    background: #e0e7ff;
-    color: #3730a3;
-  }
-  .badge.visit {
-    background: #fce7f3;
+  .visit {
+    margin-left: 0.4rem;
     color: #9d174d;
   }
-  .rest-badge {
-    background: #fef3c7;
-    color: #92400e;
-  }
-
-  .timeline {
+  .day-items {
     list-style: none;
-    margin: 0.9rem 0 0;
-    padding: 0 0 0 1.4rem;
-    border-left: 2px solid #e2e8f0;
-    margin-left: 0.4rem;
+    margin: 0.3rem 0 0;
+    padding: 0 0 0 calc(3.6rem + 0.75rem);
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    font-size: 0.85rem;
   }
-  .tl-stop {
-    position: relative;
-    padding: 0.2rem 0;
+  .day-items li {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 0.5rem;
   }
-  .tl-stop strong {
-    margin-right: 0.5rem;
+  .item-name {
+    font-weight: 600;
   }
-  .tl-meta {
-    font-size: 0.8rem;
+  .item-meta {
     color: #64748b;
   }
-  .tl-dot {
-    position: absolute;
-    left: calc(-1.4rem - 8px);
-    top: 0.45rem;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: white;
-    border: 3px solid #1e3a8a;
-  }
-  .tl-dot.end {
-    border-color: white;
-    box-shadow: 0 0 0 2px #1e3a8a;
-  }
-  .tl-dot.poi {
-    width: 12px;
-    height: 12px;
-    left: calc(-1.4rem - 7px);
-    border-radius: 2px;
-    border-color: #db2777;
-    transform: rotate(45deg);
-  }
-  .tl-leg {
-    font-size: 0.75rem;
-    color: #94a3b8;
-    padding: 0.15rem 0;
-  }
-  .notes {
-    white-space: pre-wrap;
-    background: #f8fafc;
-    border-left: 3px solid #cbd5e1;
-    padding: 0.4rem 0.6rem;
-    margin: 0.35rem 0 0.25rem;
-    font-size: 0.88rem;
+  .item-notes {
     color: #334155;
-    border-radius: 0 6px 6px 0;
+    white-space: pre-wrap;
+    flex-basis: 100%;
+  }
+  .item-name + .item-notes {
+    flex-basis: auto;
+    flex: 1;
+  }
+  @media (max-width: 600px) {
+    .day-stats {
+      margin-left: 0;
+    }
+    .day-items {
+      padding-left: 0;
+    }
   }
 
   .summary-footer {
@@ -406,7 +336,7 @@
     .top-bar {
       display: none;
     }
-    .day-card,
+    .day,
     .cover,
     .strip-card {
       box-shadow: none;

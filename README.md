@@ -20,6 +20,9 @@ SvelteKit 5 + TypeScript, Leaflet/OpenStreetMap, Neon Postgres, Hosting auf Verc
   km und Fahrzeiten.
 - **Tagesübersicht** (`/trip/[id]/summary`): Tag für Tag mit Datum, Fahrtagen, Ruhetagen,
   Zwischenzielen und Notizen, druckbar.
+- **Gemeinsam planen**: „👥 Teilen“ auf der Planungsseite gibt eine Reise für andere registrierte Nutzer
+  frei. Alle Mitglieder können mitplanen; die Seite holt alle paar Sekunden den aktuellen Stand.
+  Ändern zwei gleichzeitig die Route, wird die zweite Änderung abgelehnt statt die erste zu überschreiben.
 
 ## Einrichtung
 
@@ -34,7 +37,10 @@ npm run dev
 
 Am einfachsten ein neues Neon-Projekt (oder einen neuen Branch) anlegen. Die Tabellen `users` und
 `auth_sessions` sind identisch zum Routenplaner. Wer dieselbe Datenbank verwendet, teilt sich also
-auch die Logins; die Reisedaten liegen getrennt in `trips` und `trip_stops`.
+auch die Logins; die Reisedaten liegen getrennt in `trips`, `trip_stops` und `trip_members`.
+
+`npm run setup-db` kann gefahrlos erneut laufen: es legt fehlende Tabellen und Spalten an und lässt
+bestehende Daten in Ruhe. Nach einem Update (z.B. für „Gemeinsam planen“) einfach nochmal ausführen.
 
 ### Routing (OpenRouteService)
 
@@ -55,12 +61,13 @@ src/lib/
   db.ts                     Neon-Zugriff (Users, Sessions, Trips, Stops, Route-Cache)
   plan.ts                   Tagesplanung aus Stopps + Route ableiten, Formatierung
   server/routing.ts         ORS/OSRM-Routing, Geocoding
-  server/trip.ts            Berechtigung + Route neu berechnen, wenn Stopps sich ändern
+  server/trip.ts            Berechtigung (Besitzer/Mitglied) + Route neu berechnen, wenn Stopps sich ändern
   components/TripMap.svelte Leaflet-Karte inkl. Drag & Drop
   components/RouteStrip.svelte  schematische Gesamtstrecke
 src/routes/
   trip/[id]/                Planung (Karte + Stopp-Liste)
   trip/[id]/summary/        Tagesübersicht
-  api/trips/[id]/...        PATCH Reise, PUT Stopps, PATCH einzelner Stopp
+  api/trips/[id]/...        GET Stand (Abgleich), PATCH Reise, PUT Stopps, PATCH einzelner Stopp,
+                            members (Teilen)
   api/geocode/...           Ortssuche + Reverse-Geocoding
 ```
